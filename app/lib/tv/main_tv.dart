@@ -19,6 +19,7 @@ import 'package:media_kit/media_kit.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../engine.dart';
+import '../appmeta.dart';
 import '../store.dart';
 import '../theme.dart';
 import 'device_profile.dart';
@@ -119,6 +120,7 @@ class _TvBootPageState extends State<TvBootPage> {
     try {
       final Directory dir = await getApplicationSupportDirectory();
       await Directory(dir.path).create(recursive: true);
+      await AppMeta.load(); // 读真实版本，否则升级检查拿兜底常量比对会假阳性
       await Store.instance.load();
       await Engine.instance.initialize(dir.path);
       await TvSession.instance.init();
