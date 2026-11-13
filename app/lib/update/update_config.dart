@@ -1,19 +1,19 @@
 /// 自动升级的远端配置。
 ///
-/// 版本源 = GitHub 私有仓库 `Goodver/jubo` 的 **Releases**。
+/// 版本源 = GitHub 仓库 `Goodver/jubo` 的 **Releases**（已设为 **public**）。
 /// 每次发版：在 GitHub 上建一个 Release，tag 用 `v<versionCode>`（例如 `v18`），
 /// 并上传对应 ABI 的 APK 资产（文件名含 `phone` / `tv` 便于自动匹配）。
 /// 客户端拉取「最新 Release」的清单，按 `versionCode` 对比本地，决定是否提示升级。
 ///
-/// 关于 token：仓库是 private，拉 Release 清单和 APK 资产都要带 Authorization。
-/// 这个 fine-grained token **只给了 jubo 这一个仓库的 Contents 读权限**，
-/// 泄露的最坏后果是别人能下载你的安装包，动不了源码、动不了其它仓库。
-/// 若哪天担心泄露，回 GitHub 把它 revoke 换新的即可（改这一个常量）。
+/// 关于认证：仓库是 public，**无需 token 即可匿名拉取清单和下载 APK**。
+/// `token` 留空字符串即可；若哪天仓库改回 private，再填一个只读 Contents 权限的
+/// fine-grained PAT 即可恢复认证访问。
 class UpdateConfig {
   const UpdateConfig._();
 
-  /// 私有仓库的 fine-grained PAT（只读 jubo 的 Contents）。
-  static const token = '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';
+  /// fine-grained PAT（只读 Contents）。仓库为 public 时**留空即可匿名访问**；
+  /// 仅当仓库改回 private 时才需要填。public 仓库下无需也不应硬编码 token。
+  static const token = '';
 
   /// 归属仓库（owner/repo）。
   static const repo = 'Goodver/jubo';
@@ -36,15 +36,18 @@ class UpdateConfig {
   ///
   /// 下载顺序：
   /// 1. 优先尝试 `assetProxyPrefixes` 里的每个代理 + 原始 URL
-  /// 2. 全部失败则回退到 GitHub 直连（仍需 Authorization）
+  /// 2. 全部失败则回退到 GitHub 直连
+  ///
+  /// **仓库为 public 时，几乎所有 GitHub 加速代理都可用**（无需 Authorization，
+  /// 代理支持好、速度快）；private 仓库只有少数代理支持（需透传 token）。
   ///
   /// 常见可用代理（按可靠性排序，2026-11 实测）：
-  /// - `https://gh-proxy.com/`（稳定，速度 2~5 MB/s）
-  /// - `https://ghfast.top/`（备用，偶尔限速）
-  /// - `https://github.moeyy.xyz/`（备用，偶尔抽风）
+  /// - `https://gh-proxy.com/`（稳定，public 仓库速度 2~5 MB/s）
+  /// - `https://ghfast.top/`（备用）
+  /// - `https://github.moeyy.xyz/`（备用）
   ///
-  /// 若仓库改为 public，代理可用性更好（无需 Authorization）；private 仓库的代理支持不确定，
-  /// 部分代理会丢弃 Authorization 头导致 401。如果代理全部失效，客户端会自动回退直连（慢但能下）。
+  /// 全部代理失效时客户端会自动回退直连（慢但能下）。代理可用性会随时间变化，
+  /// 失效时增删这个列表即可。
   static const assetProxyPrefixes = <String>[
     'https://gh-proxy.com/',
     'https://ghfast.top/',

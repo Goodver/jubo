@@ -53,11 +53,16 @@ class UpdateService {
     ..connectionTimeout = _timeout
     ..autoUncompress = true;
 
-  Map<String, String> get _authHeaders => {
-        'Authorization': 'Bearer ${UpdateConfig.token}',
-        'Accept': 'application/vnd.github+json',
-        'User-Agent': 'hgonly-updater',
-      };
+  /// 请求头：token 非空时带 Authorization（私有仓库）；public 仓库 token 留空即可匿名访问。
+  Map<String, String> get _authHeaders {
+    final h = <String, String>{
+      'Accept': 'application/vnd.github+json',
+      'User-Agent': 'hgonly-updater',
+    };
+    final token = UpdateConfig.token.trim();
+    if (token.isNotEmpty) h['Authorization'] = 'Bearer $token';
+    return h;
+  }
 
   /// 检查是否有新版本。[assetKey] 传 phone / tv，用来在多资产 Release 里
   /// 挑中本端该装的 APK；传 null 则取第一个 .apk 资产。
