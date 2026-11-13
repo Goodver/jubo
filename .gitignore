@@ -1,0 +1,48 @@
+# ===== Build artifacts (huge, rebuildable) =====
+app/build/
+**/build/
+**/.dart_tool/
+**/.gradle/
+**/.flutter-plugins
+**/.flutter-plugins-dependencies
+**/flutter_export_environment.sh
+**/Generated.xcconfig
+**/ephemeral/
+
+# ===== Android / Gradle =====
+**/*.apk
+**/*.aab
+**/local.properties
+**/.idea/
+**/*.iml
+**/*.ipr
+**/*.iws
+**/captures/
+**/.cxx/
+
+# ===== Logs & scratch dumps (from reverse-engineering sessions) =====
+*.log
+*.ab
+_ui*.xml
+_v*.xml
+_uibk.xml
+_core_probe_arm64
+_fallback_url.txt
+_hg_logcat.txt
+_hglogs/
+_probe_run_*/
+_build_so_*.log
+_diag_*.log
+_e2e_after_fix_*.log
+_live_probe_*.log
+_pool_sweep_*.log
+sky_sc_err.txt
+tv_p0_sc_err.txt
+
+# ===== Local backups not needed in repo =====
+.workbuddy-tv-backup-*/
+
+# ===== OS / editor cruft =====
+.DS_Store
+Thumbs.db
+*.swp

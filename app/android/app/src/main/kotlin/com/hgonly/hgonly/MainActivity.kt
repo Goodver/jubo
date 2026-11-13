@@ -1,0 +1,268 @@
+package com.hgonly.hgonly
+
+import android.media.MediaCodecList
+import android.os.Build
+import android.provider.Settings
+import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.MethodChannel
+import java.util.concurrent.TimeUnit
+
+/**
+ * 「自定义设备」里的「读取本机」靠这个通道拿到这台手机的身份。
+ *
+ *  - 红果 App 的 did / uid 存在它自己的私有目录里，普通 App 没有跨应用读取权限，
+ *    只有 root 过的机器才拿得到（读 /data/data/com.phoenix.read/shared_prefs）。
+ *  - 没 root 时退化成读取本机硬件档案 + 用 ANDROID_ID 派生一个稳定设备号，
+ *    至少保证设备号「跟着这台机器走」，不会每次启动都变。
+ *
+ * 红果 App 自己的界面（关于页、个人信息收集设置）并不展示 did，所以读屏也拿不到。
+ */
+class MainActivity : FlutterActivity() {
+    private val channelName = "hgonly/device"
+
+    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+        super.configureFlutterEngine(flutterEngine)
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "readIdentity" -> {
+                        try {
+                            result.success(readIdentity())
+                        } catch (t: Throwable) {
+                            result.error("read_failed", t.message ?: "读取失败", null)
+                        }
+                    }
+                    // TV 分支：按 SoC 分化解码策略所需的平台指纹。
+                    "readTvDevice" -> {
+                        try {
+                            result.success(readTvDevice())
+                        } catch (t: Throwable) {
+                            result.error("read_failed", t.message ?: "读取失败", null)
+                        }
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+    }
+
+    private fun readIdentity(): Map<String, Any> {
+        val metrics = resources.displayMetrics
+        // 红果的 resolution 是「宽*高」，不能按长短边排，否则会跟真机对不上。
+        val width = metrics.widthPixels
+        val height = metrics.heightPixels
+        val androidId = try {
+            Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID) ?: ""
+        } catch (t: Throwable) {
+            ""
+        }
+
+        val rooted = hasRoot()
+        var did = ""
+        var uid = ""
+        var source = "本机档案"
+
+        if (rooted) {
+            val prefs = readHongguoPrefs()
+            did = prefs["device_id"].orEmpty()
+            uid = prefs["user_id"].orEmpty()
+            if (did.isNotEmpty() || uid.isNotEmpty()) {
+                source = "红果 App 缓存"
+            }
+        }
+
+        // 没 root 时读不到红果 App 私有目录里的 device_id。这里不再编造一个
+        // 「看起来像」的号填进去——设备号是设备在服务端注册时分配的，编出来的
+        // 号对取流没有任何帮助，反而会让档案看起来像伪造设备。宁可留空。
+        val note = when {
+            source == "红果 App 缓存" -> "已从红果 App 缓存读取设备号"
+            !rooted -> "未 root，读不到红果 App 的设备号。请在红果 App 里打开「基础信息」页" +
+                "（能看到 device_id 那一页），把 16 位数字填到下面。机型/系统已按本机自动填好。"
+            else -> "已 root，但红果缓存里没有设备号（未登录过或数据被清），请在红果 App 的「基础信息」页查看"
+        }
+
+        return mapOf(
+            "did" to did,
+            "uid" to uid,
+            "rooted" to rooted,
+            "source" to source,
+            "note" to note,
+            "androidId" to androidId,
+            "brand" to normalizeBrand(Build.BRAND, Build.MANUFACTURER),
+            "rawBrand" to Build.BRAND,
+            "manufacturer" to Build.MANUFACTURER,
+            "model" to Build.MODEL,
+            "osVersion" to Build.VERSION.RELEASE,
+            "osApi" to Build.VERSION.SDK_INT,
+            "resolution" to "$width*$height",
+            "dpi" to metrics.densityDpi.toString(),
+            "abi" to (Build.SUPPORTED_ABIS.firstOrNull() ?: ""),
+        )
+    }
+
+    /**
+     * TV 解码策略用的设备指纹（2026-11-07）。
+     *
+     * 结论收窄为「Amlogic tl1 的 MediaCodec HAL 回读 NV12 时 U/V 平面反读」：
+     *  - 海尔 HRA972_TX_A / Amlogic tl1 / Android 9：硬解偏蓝，必须软解；
+     *  - 创维 8H672_A5FMN / 海思 Hi3751V660 (huanglong) / Android 12：硬解颜色
+     *    正常且 CPU 只有软解的约 39%，应当用硬解。
+     * 所以策略必须读 ro.board.platform / ro.hardware / Build.*，不能靠「是不是 TV」
+     * 一刀切，也不能只看有没有 HEVC 硬解码器。
+     *
+     * 用 `/system/bin/getprop` 一次性读全量属性再解析，避免反射访问
+     * android.os.SystemProperties 被隐藏 API 限制挡住（Android 9 / 12 都验证过）。
+     */
+    private fun readTvDevice(): Map<String, Any> {
+        val props = readAllSystemProperties()
+        fun prop(vararg keys: String): String = keys
+            .firstNotNullOfOrNull { key -> props[key]?.takeIf { it.isNotBlank() } }
+            .orEmpty()
+
+        return mapOf(
+            "boardPlatform" to prop("ro.board.platform"),
+            "hardware" to prop("ro.hardware", "ro.hardware.chipname"),
+            "board" to prop("ro.product.board", "ro.product.vendor.board"),
+            "product" to prop("ro.build.product", "ro.product.name"),
+            "model" to Build.MODEL,
+            "brand" to Build.BRAND,
+            "manufacturer" to Build.MANUFACTURER,
+            "release" to Build.VERSION.RELEASE,
+            "sdkInt" to Build.VERSION.SDK_INT,
+            "abi" to (Build.SUPPORTED_ABIS.firstOrNull() ?: ""),
+            "hevcDecoders" to hevcDecoderNames(),
+        )
+    }
+
+    private fun readAllSystemProperties(): Map<String, String> {
+        val out = mutableMapOf<String, String>()
+        try {
+            val process = ProcessBuilder("/system/bin/getprop")
+                .redirectErrorStream(true)
+                .start()
+            val pattern = Regex("""^\[([^]]+)]:\s*\[(.*)]$""")
+            process.inputStream.bufferedReader().useLines { lines ->
+                lines.forEach { line ->
+                    val match = pattern.find(line) ?: return@forEach
+                    out[match.groupValues[1]] = match.groupValues[2]
+                }
+            }
+            if (!process.waitFor(3, TimeUnit.SECONDS)) process.destroy()
+        } catch (_: Throwable) {
+            // getprop 不可用时退回空表，Dart 侧会走「未知平台 → 保守软解」。
+        }
+        return out
+    }
+
+    /** 列出 HEVC 解码器名，用作规则匹配与实机取证（例如 OMX.amlogic.* / OMX.hisi.*）。 */
+    private fun hevcDecoderNames(): List<String> = try {
+        MediaCodecList(MediaCodecList.ALL_CODECS).codecInfos
+            .filter { info ->
+                !info.isEncoder && info.supportedTypes.any { type ->
+                    type.equals("video/hevc", ignoreCase = true) ||
+                        type.equals("video/hevc10", ignoreCase = true)
+                }
+            }
+            .map { it.name }
+            .sorted()
+    } catch (_: Throwable) {
+        emptyList()
+    }
+
+    /**
+     * 归一化成红果 device_brand 用的厂商名：Redmi / POCO 都属于 xiaomi，
+     * 不能直接拿 Build.BRAND 交上去，否则设备档案会自相矛盾。
+     */
+    private fun normalizeBrand(brand: String, manufacturer: String): String {
+        val raw = "$brand $manufacturer".lowercase()
+        return when {
+            raw.contains("redmi") || raw.contains("xiaomi") || raw.contains("poco") -> "xiaomi"
+            raw.contains("huawei") -> "harmonyos"
+            raw.contains("honor") -> "honor"
+            raw.contains("oneplus") -> "OnePlus"
+            raw.contains("oppo") || raw.contains("realme") -> "coloros"
+            raw.contains("vivo") || raw.contains("iqoo") -> "vivo"
+            raw.contains("samsung") -> "samsung"
+            raw.contains("meizu") -> "meizu"
+            else -> brand.lowercase()
+        }
+    }
+
+    /** root 可用时返回 true。超时或没有 su 都按「没有 root」处理。 */
+    private fun hasRoot(): Boolean {
+        return try {
+            val process = ProcessBuilder("su", "-c", "id").redirectErrorStream(true).start()
+            val finished = process.waitFor(2500, TimeUnit.MILLISECONDS)
+            if (!finished) {
+                process.destroy()
+                return false
+            }
+            if (process.exitValue() != 0) return false
+            process.inputStream.bufferedReader().readText().contains("uid=0")
+        } catch (t: Throwable) {
+            false
+        }
+    }
+
+    /**
+     * 从红果 App 的 SharedPreferences 里捞 did / uid。
+     * key 名在不同版本里可能是 device_id / user_id / uid / user_id_str 等，这里都试一遍。
+     */
+    private fun readHongguoPrefs(): Map<String, String> {
+        val dirs = listOf(
+            "/data/data/com.phoenix.read/shared_prefs",
+            "/data/user/0/com.phoenix.read/shared_prefs",
+        )
+        val entries = mutableMapOf<String, String>()
+        val pattern = Regex("<string name=\"([A-Za-z0-9_]+)\">([^<]{1,64})</string>")
+
+        for (dir in dirs) {
+            val text = runRoot(
+                "grep -rhoE '<string name=\"[A-Za-z0-9_]+\">[^<]{1,64}</string>' $dir 2>/dev/null"
+            ) ?: continue
+            if (text.isBlank()) continue
+            for (match in pattern.findAll(text)) {
+                val key = match.groupValues[1]
+                val value = match.groupValues[2].trim()
+                if (value.isNotEmpty()) entries.putIfAbsent(key, value)
+            }
+            if (entries.containsKey("device_id") || entries.containsKey("user_id")) break
+        }
+
+        val out = mutableMapOf<String, String>()
+        for (key in listOf("device_id", "device_id_int", "deviceid")) {
+            val value = entries[key] ?: continue
+            if (value.matches(Regex("\\d{10,25}"))) {
+                out["device_id"] = value
+                break
+            }
+        }
+        for (key in listOf("user_id", "user_id_str", "uid", "uid_str")) {
+            val value = entries[key] ?: continue
+            if (value.matches(Regex("\\d{3,25}"))) {
+                out["user_id"] = value
+                break
+            }
+        }
+        return out
+    }
+
+    private fun runRoot(command: String): String? {
+        return try {
+            val process = ProcessBuilder("su", "-c", command).redirectErrorStream(true).start()
+            val finished = process.waitFor(5000, TimeUnit.MILLISECONDS)
+            if (!finished) {
+                process.destroy()
+                return null
+            }
+            process.inputStream.bufferedReader().readText()
+        } catch (t: Throwable) {
+            null
+        }
+    }
+
+    /**
+     * 没 root 时用 ANDROID_ID 派生一个 19 位、以 7 开头的稳定设备号。
+     * 同一台机器每次算出来都一样，重装 App 也不会变（ANDROID_ID 在同一设备上稳定）。
+     */
+}

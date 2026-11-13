@@ -1,0 +1,405 @@
+package core
+
+import (
+	"bytes"
+	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/sha512"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// 红果多清晰度取流：multi_video_model 取模型 → fallback_api 取清晰度列表 →
+// spade URL 解密 → spade_a 派生 CENC 内容密钥。签名头与参数顺序均需与客户端一致。
+
+const (
+	hongguoMultiVideoPath = "/novel/player/multi_video_model/v1/"
+	// 官方红果短剧 PC 客户端（v1.2.2，Wails 壳）实测参数：UA 73932 + 精简设备字段 + 注册过的 device_token/ttreq。
+	// 老式 hgdj.js 27 字段 query（无 token、71332）会被服务端风控：固定设备 110001、随机设备空响应。
+	hongguoMediaUserAgent = "com.phoenix.read/73932 (Linux; U; Android 14; zh_CN; Xiaomi 14; Build/UKQ1.230804.001; Cronet/TTNetVersion:8d40f833 QuicVersion:462f352c 2026-08-31)"
+	hongguoMediaVersion   = "7.3.9.32"
+	// 官方客户端 device.json 注册设备（hongguo_v73）
+	hongguoMediaDeviceID    = "1905922028880368"
+	hongguoMediaInstallID   = "1905922028884464"
+	hongguoMediaIID         = "1905922028884464"
+	hongguoMediaCDID        = "f71c5398-d04a-4bc6-864a-83050ffc57da"
+	hongguoMediaOpenUDID    = "b24a5d3fad412506"
+	hongguoMediaDeviceToken = "AAAZDIJFBIRP23X6I37K6VI6IL475PVSYAICEX63NWZZ5KHVRI7KBWLKGHEHU2X4VV7JGB6L3GFQMW3IZNZ57DC2Z5POX2GQMUVI7VIJGUEUEO42DVK6UUD5ZNXWA"
+	hongguoMediaTtReq       = "1$b3a513fcf1657ebf658801c0e859fea56caf7e17"
+	hongguoMediaStoreRegion = "cn-yn"
+)
+
+var hongguoSpadeConstants = func() []byte {
+	decoded, err := hex.DecodeString("4dd4c2e6b83162090e52b3c7a6733ba41cb2462b829ab58a196b39db57177524f49baf7f08e8d68d26a72e37c1a95a2f1f05a51892aef2949732b62a38aadd58")
+	if err != nil {
+		panic("红果 spade 常量无效: " + err.Error())
+	}
+	return decoded
+}()
+
+var hongguoMediaQualityPattern = regexp.MustCompile(`(2160|1440|1080|720|576|540|480|360)`)
+
+type hongguoQueryPair struct {
+	key   string
+	value string
+}
+
+func hongguoQueryEscape(value string) string {
+	escaped := url.QueryEscape(value)
+	escaped = strings.ReplaceAll(escaped, "+", "%20")
+	return strings.ReplaceAll(escaped, "%2A", "*")
+}
+
+// hongguoDeviceQuery 构造与官方客户端一致的精简设备 query。
+// 关键：不要混入 aid/app_name/version_code 等老式字段（会触发风控空响应）。
+// 字段名固定，只有取值随设备身份变化。
+func hongguoDeviceQuery(device hongguoDeviceProfile, khronos uint32, ticket uint64) string {
+	pairs := []hongguoQueryPair{
+		{"device_id", device.DeviceID},
+		{"install_id", device.InstallID},
+		{"iid", device.IID},
+		{"cdid", device.CDID},
+		{"openudid", device.OpenUDID},
+		{"device_brand", device.Brand},
+		{"device_type", device.Model},
+		{"os_version", device.OSVersion},
+		{"os_api", device.OSAPI},
+		{"resolution", device.Resolution},
+		{"dpi", device.DPI},
+		{"user_agent", device.UserAgent},
+		{"channel", device.Channel},
+		{"odin_tt", ""},
+		{"device_token", device.DeviceToken},
+		{"ttreq", device.TtReq},
+		{"store_region", device.StoreRegion},
+		{"ts", strconv.FormatUint(uint64(khronos), 10)},
+		{"_rticket", strconv.FormatUint(ticket, 10)},
+	}
+	// 没有 token 的身份只发身份字段，不发空的 device_token/ttreq：
+	// 空票据会被判成「票据缺失」，反而不如干脆不带。
+	if !device.TokenBound {
+		pairs = []hongguoQueryPair{
+			{"device_id", device.DeviceID},
+			{"install_id", device.InstallID},
+			{"iid", device.IID},
+			{"cdid", device.CDID},
+			{"openudid", device.OpenUDID},
+			{"device_brand", device.Brand},
+			{"device_type", device.Model},
+			{"os_version", device.OSVersion},
+			{"os_api", device.OSAPI},
+			{"resolution", device.Resolution},
+			{"dpi", device.DPI},
+			{"user_agent", device.UserAgent},
+			{"channel", device.Channel},
+			{"store_region", device.StoreRegion},
+			{"ts", strconv.FormatUint(uint64(khronos), 10)},
+			{"_rticket", strconv.FormatUint(ticket, 10)},
+		}
+	}
+	var builder strings.Builder
+	for index, pair := range pairs {
+		if index > 0 {
+			builder.WriteByte('&')
+		}
+		builder.WriteString(hongguoQueryEscape(pair.key))
+		builder.WriteByte('=')
+		builder.WriteString(hongguoQueryEscape(pair.value))
+	}
+	return builder.String()
+}
+
+type hongguoMediaCall struct {
+	url     string
+	body    []byte
+	headers map[string]string
+}
+
+func hongguoMediaPayload(videoID string) []byte {
+	return []byte(`{"biz_param":{"detail_page_version":0,"device_level":3,"disable_digg_stat":false,"need_all_video_definition":true,"need_mp4_align":false,"use_os_player":false,"use_server_dns":false,"video_platform":1024},"mixed_video_id_map":{"1004":["` + videoID + `"]}}`)
+}
+
+func hongguoBuildMediaCall(device hongguoDeviceProfile, host, videoID string) hongguoMediaCall {
+	body := hongguoMediaPayload(videoID)
+	khronos := uint32(time.Now().Unix())
+	baseTicket := uint64(time.Now().UnixMilli())
+	var rawURL, query string
+	var requestTicket uint64
+	// branch 1 的签名变体服务端不认，抖动 _rticket 直到落在其它分支。
+	for offset := uint64(0); offset < 32; offset++ {
+		requestTicket = baseTicket + offset
+		query = hongguoDeviceQuery(device, khronos, requestTicket)
+		rawURL = strings.TrimRight(host, "/") + hongguoMultiVideoPath + "?" + query
+		if hongguoBranchOf(rawURL, body, khronos) != 1 {
+			break
+		}
+	}
+	headers := hongguoSignSuite(device, rawURL, body, khronos, requestTicket)
+	return hongguoMediaCall{url: rawURL, body: body, headers: headers}
+}
+
+func hongguoMediaModelEntry(result map[string]any, videoID string) (map[string]any, error) {
+	data := nestedMap(result, "data")
+	if data == nil {
+		return nil, errors.New("红果取流接口没有返回数据")
+	}
+	entry, _ := data[videoID].(map[string]any)
+	if entry == nil {
+		keys := make([]string, 0, len(data))
+		for key := range data {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			if candidate, ok := data[key].(map[string]any); ok {
+				entry = candidate
+				break
+			}
+		}
+	}
+	if entry == nil {
+		return nil, errors.New("红果取流接口没有该视频的播放信息")
+	}
+	if encoded, ok := entry["video_model"].(string); ok {
+		var model map[string]any
+		decoder := json.NewDecoder(strings.NewReader(encoded))
+		decoder.UseNumber()
+		if err := decoder.Decode(&model); err != nil {
+			return nil, errors.New("红果播放信息格式异常")
+		}
+		return model, nil
+	}
+	model, _ := entry["video_model"].(map[string]any)
+	if model == nil {
+		return nil, errors.New("红果播放信息内容为空")
+	}
+	return model, nil
+}
+
+func hongguoFallbackAddress(model map[string]any) string {
+	value := model["fallback_api"]
+	switch typed := value.(type) {
+	case string:
+		trimmed := strings.TrimSpace(typed)
+		if strings.HasPrefix(trimmed, "{") {
+			var parsed map[string]any
+			if json.Unmarshal([]byte(trimmed), &parsed) == nil {
+				if nested := mapString(parsed, "fallback_api"); nested != "" {
+					return nested
+				}
+			}
+		}
+		return trimmed
+	case []any:
+		if len(typed) > 0 {
+			return nativeText(typed[0])
+		}
+	case map[string]any:
+		return mapString(typed, "fallback_api")
+	}
+	return ""
+}
+
+func (d *Downloader) hongguoFallbackInfo(ctx context.Context, device hongguoDeviceProfile, address string) (map[string]any, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, address, nil)
+	if err != nil {
+		return nil, err
+	}
+	agent := device.UserAgent
+	if agent == "" {
+		agent = hongguoMediaUserAgent
+	}
+	request.Header.Set("User-Agent", agent)
+	request.Header.Set("Accept-Language", "zh-CN,zh;q=0.9")
+	if cookie := hongguoSignCookie(device, 0); cookie != "" {
+		request.Header.Set("Cookie", cookie)
+	}
+	response, err := d.doPlaybackRequest(request, 10*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	content, readErr := io.ReadAll(io.LimitReader(response.Body, providerMaxBodyBytes+1))
+	response.Body.Close()
+	if readErr != nil {
+		return nil, readErr
+	}
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("红果清晰度接口 HTTP %d", response.StatusCode)
+	}
+	var outer map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(content))
+	decoder.UseNumber()
+	if err := decoder.Decode(&outer); err != nil {
+		return nil, errors.New("红果清晰度接口返回格式异常")
+	}
+	return nestedMap(nestedMap(outer, "video_info"), "data"), nil
+}
+
+func hongguoSpadeAddress(value string, seed []byte) (string, error) {
+	encoded := strings.TrimSpace(value)
+	if encoded == "" {
+		return "", nil
+	}
+	raw, err := hongguoDecodeBase64URLSafe(encoded)
+	if err != nil || len(raw) < 5 {
+		return "", errors.New("红果 spade 地址密文过短")
+	}
+	if raw[0] != 0xa8 || raw[2] != 0x01 || raw[3] != 0x00 {
+		return "", errors.New("红果 spade 地址头格式错误")
+	}
+	cipherLength := (len(raw) - 4) / 16 * 16
+	if cipherLength == 0 {
+		return "", errors.New("红果 spade 地址没有完整密文块")
+	}
+	first := sha512.Sum512(seed)
+	second := sha512.Sum512(append(append([]byte{}, first[:]...), hongguoSpadeConstants...))
+	block, err := aes.NewCipher(second[:16])
+	if err != nil {
+		return "", err
+	}
+	plaintext := make([]byte, cipherLength)
+	cipher.NewCBCDecrypter(block, second[16:32]).CryptBlocks(plaintext, raw[4:4+cipherLength])
+	if len(plaintext) > 0 {
+		padding := int(plaintext[len(plaintext)-1])
+		if padding >= 1 && padding <= 16 && padding <= len(plaintext) {
+			plaintext = plaintext[:len(plaintext)-padding]
+		}
+	}
+	for len(plaintext) > 0 && plaintext[len(plaintext)-1] == 0 {
+		plaintext = plaintext[:len(plaintext)-1]
+	}
+	return string(plaintext), nil
+}
+
+func hongguoDecodeBase64URLSafe(value string) ([]byte, error) {
+	value = strings.TrimSpace(value)
+	value = strings.NewReplacer("-", "+", "_", "/").Replace(value)
+	if decoded, err := base64.StdEncoding.DecodeString(value); err == nil {
+		return decoded, nil
+	}
+	return base64.RawStdEncoding.DecodeString(value)
+}
+
+func hongguoMediaQualityNumber(value string) int {
+	text := strings.TrimSpace(value)
+	if matched := hongguoMediaQualityPattern.FindString(text); matched != "" {
+		number, _ := strconv.Atoi(matched)
+		return number
+	}
+	switch text {
+	case "1920":
+		return 1080
+	case "1280":
+		return 720
+	case "1024":
+		return 576
+	case "854":
+		return 480
+	case "640":
+		return 360
+	}
+	if len(text) >= 3 && len(text) <= 4 {
+		if number, err := strconv.Atoi(text); err == nil {
+			return number
+		}
+	}
+	return 0
+}
+
+func hongguoQualityLabel(value string) string {
+	if number := hongguoMediaQualityNumber(value); number > 0 {
+		return strconv.Itoa(number) + "P"
+	}
+	labels := map[string]string{
+		"low": "流畅", "smooth": "流畅", "medium": "标清", "normal": "高清",
+		"high": "超清", "original": "原画", "uhd": "原画", "super_high": "原画",
+	}
+	if label, found := labels[strings.ToLower(strings.TrimSpace(value))]; found {
+		return label
+	}
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "自动"
+	}
+	return trimmed
+}
+
+type hongguoQualityRow struct {
+	key     string
+	quality string
+	item    map[string]any
+}
+
+func hongguoQualityRows(videoList map[string]any) []hongguoQualityRow {
+	var rows []hongguoQualityRow
+	for key, value := range videoList {
+		item, _ := value.(map[string]any)
+		if item == nil {
+			item = map[string]any{}
+		}
+		if mapString(item, "main_url") == "" {
+			continue
+		}
+		duplicated := false
+		for _, row := range rows {
+			if row.key == key {
+				duplicated = true
+				break
+			}
+		}
+		if duplicated {
+			continue
+		}
+		quality := firstNonEmpty(mapString(item, "quality_desc", "height", "vheight", "quality"), key)
+		rows = append(rows, hongguoQualityRow{key: key, quality: quality, item: item})
+	}
+	sort.SliceStable(rows, func(i, j int) bool {
+		left := firstNonEmpty(rows[i].quality, rows[i].key)
+		right := firstNonEmpty(rows[j].quality, rows[j].key)
+		return hongguoMediaQualityNumber(left) > hongguoMediaQualityNumber(right)
+	})
+	return rows
+}
+
+func (downloader *Downloader) resolveHongguoMultiMedia(ctx context.Context, videoID string) (providerMedia, error) {
+	// 1.2.20 的做法：多套设备身份 × 多条线路并发取流，谁先成功用谁。
+	// 具体调度与兜底顺序见 provider_hongguo_race.go。
+	return downloader.raceHongguoPlayback(ctx, videoID)
+}
+
+// 取流阶段顺带拉取 m3u8：播放时本机流服务直接返回缓存内容，省掉一次远程往返。
+// 预取失败不阻断播放，交由播放阶段按既有重试处理。
+func (downloader *Downloader) prepareHongguoPlaylist(ctx context.Context, media providerMedia) providerMedia {
+	if media.Playlist != "" || !isProviderHTTPMediaURL(media.URL) {
+		return media
+	}
+	parsed, err := url.Parse(media.URL)
+	if err != nil || !strings.HasSuffix(strings.ToLower(parsed.Path), ".m3u8") {
+		return media
+	}
+	playlist, finalURL, err := downloader.fetchMediaPlaylist(ctx, media.URL, media.Referer)
+	if err != nil {
+		return media
+	}
+	if !strings.HasPrefix(strings.TrimSpace(strings.TrimPrefix(playlist, "\ufeff")), "#EXTM3U") {
+		return media
+	}
+	media.Playlist = playlist
+	media.URL = finalURL
+	if duration := m3u8Duration(playlist); duration > 0 {
+		media.Duration = duration
+	}
+	return media
+}
