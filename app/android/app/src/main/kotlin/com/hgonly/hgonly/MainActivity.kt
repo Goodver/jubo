@@ -1,11 +1,15 @@
 package com.hgonly.hgonly
 
+import android.content.Intent
 import android.media.MediaCodecList
+import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import androidx.core.content.FileProvider
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import java.io.File
 import java.util.concurrent.TimeUnit
 
 /**
@@ -20,6 +24,7 @@ import java.util.concurrent.TimeUnit
  */
 class MainActivity : FlutterActivity() {
     private val channelName = "hgonly/device"
+    private val updateChannelName = "hgonly/update"
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -44,6 +49,69 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+        // 自动升级：Dart 下载好 APK 后调这里拉起系统安装器。
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, updateChannelName)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "installApk" -> {
+                        val path = call.argument<String>("path")
+                        if (path.isNullOrBlank()) {
+                            result.error("bad_args", "缺少 APK 路径", null)
+                            return@setMethodCallHandler
+                        }
+                        try {
+                            installApk(path)
+                            result.success(true)
+                        } catch (t: Throwable) {
+                            result.error("install_failed", t.message ?: "拉起安装失败", null)
+                        }
+                    }
+                    // 跳系统「安装未知应用」授权页（Android 8+ 装包前可能需要）。
+                    "openInstallPermissionSettings" -> {
+                        try {
+                            openInstallPermissionSettings()
+                            result.success(true)
+                        } catch (t: Throwable) {
+                            result.error("settings_failed", t.message ?: "无法打开设置", null)
+                        }
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+    }
+
+    /**
+     * 用 FileProvider 把下载好的 APK 交给系统安装器。
+     * authority 必须是 `${applicationId}.fileprovider`——tv flavor 的
+     * applicationId 带 `.tv` 后缀，所以不能用写死的包名，取 applicationContext。
+     */
+    private fun installApk(path: String) {
+        val file = File(path)
+        if (!file.exists()) throw IllegalStateException("APK 不存在：$path")
+        val uri = FileProvider.getUriForFile(
+            this, "${applicationContext.packageName}.fileprovider", file
+        )
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "application/vnd.android.package-archive")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        startActivity(intent)
+    }
+
+    private fun openInstallPermissionSettings() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
+                data = Uri.parse("package:$packageName")
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(intent)
+        } else {
+            // 旧系统没有未知来源按应用授权，退回通用安全设置。
+            startActivity(Intent(Settings.ACTION_SECURITY_SETTINGS).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            })
+        }
     }
 
     private fun readIdentity(): Map<String, Any> {

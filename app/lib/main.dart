@@ -11,6 +11,8 @@ import 'feed_page.dart';
 import 'nav.dart';
 import 'store.dart';
 import 'theme.dart';
+import 'update/update_config.dart';
+import 'update/update_flow.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -37,8 +39,38 @@ class HgApp extends StatelessWidget {
         GlobalCupertinoLocalizations.delegate,
       ],
       home: const BootPage(),
+      // 自动升级：进推荐流后静默检查一次，有新版才弹窗（不阻塞启动）。
+      builder: (context, child) => Stack(
+        children: [
+          ?child,
+          const _StartupUpdateCheck(),
+        ],
+      ),
     );
   }
+}
+
+/// 启动检查更新：挂在整个 Navigator 之上，只负责在首页就绪后检查一次。
+class _StartupUpdateCheck extends StatefulWidget {
+  const _StartupUpdateCheck();
+
+  @override
+  State<_StartupUpdateCheck> createState() => _StartupUpdateCheckState();
+}
+
+class _StartupUpdateCheckState extends State<_StartupUpdateCheck> {
+  @override
+  void initState() {
+    super.initState();
+    // 延迟到推荐流已推出、首帧稳定后再查，避免跟启动动画抢焦点。
+    Future<void>.delayed(const Duration(seconds: 3), () async {
+      if (!mounted) return;
+      await UpdateFlow.checkOnStartup(context, assetKey: UpdateConfig.phoneAssetKey);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) => const SizedBox.shrink();
 }
 
 /// 启动即进推荐流：引擎就绪后直接全屏播放，不经过任何首页/详情页

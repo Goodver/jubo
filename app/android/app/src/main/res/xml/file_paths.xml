@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FileProvider 路径映射：自动升级把 APK 下到应用私有目录后交给系统安装器。 -->
+<paths>
+    <!-- 覆盖 getExternalFilesDir 下所有子目录（下载的 APK 放这里）。 -->
+    <external-files-path name="update_apk" path="." />
+    <!-- 兜底覆盖内部 files 目录。 -->
+    <files-path name="update_apk_internal" path="." />
+</paths>

@@ -91,3 +91,8 @@ kotlin {
 flutter {
     source = "../.."
 }
+
+dependencies {
+    // 自动升级用 FileProvider 暴露下载好的 APK 给系统安装器。
+    implementation("androidx.core:core-ktx:1.13.1")
+}

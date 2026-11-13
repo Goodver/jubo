@@ -15,6 +15,8 @@ import 'package:flutter/services.dart';
 import '../engine.dart';
 import '../models.dart';
 import '../store.dart';
+import '../update/update_config.dart';
+import '../update/update_flow.dart';
 import 'decode_settings.dart';
 import 'device_profile.dart';
 import 'tv_calibration_page.dart';
@@ -34,6 +36,7 @@ enum _RowKind {
   history,
   saved,
   calibration,
+  update,
 }
 
 class _RowItem {
@@ -122,6 +125,12 @@ class _TvHomePageState extends State<TvHomePage> {
       subtitle: '背景是否触边',
       icon: Icons.fullscreen_rounded,
     ),
+    const _RowItem(
+      '检查更新',
+      _RowKind.update,
+      subtitle: '自动升级',
+      icon: Icons.system_update_alt_rounded,
+    ),
   ];
 
   ({String id, WatchMark mark})? get _resume =>
@@ -138,6 +147,11 @@ class _TvHomePageState extends State<TvHomePage> {
     super.initState();
     HardwareKeyboard.instance.addHandler(_onKey);
     unawaited(_boot());
+    // 启动进首页、首帧稳定后静默检查一次更新，有新版才弹窗（不抢启动焦点）。
+    Future<void>.delayed(const Duration(seconds: 3), () async {
+      if (!mounted) return;
+      await UpdateFlow.checkOnStartup(context, assetKey: UpdateConfig.tvAssetKey);
+    });
   }
 
   @override
@@ -304,6 +318,9 @@ class _TvHomePageState extends State<TvHomePage> {
         break;
       case _RowKind.saved:
         await _openLibrary(1);
+        break;
+      case _RowKind.update:
+        await UpdateFlow.checkManually(context, assetKey: UpdateConfig.tvAssetKey);
         break;
     }
   }

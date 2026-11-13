@@ -7,6 +7,8 @@ import 'engine.dart';
 import 'models.dart';
 import 'store.dart';
 import 'theme.dart';
+import 'update/update_config.dart';
+import 'update/update_flow.dart';
 
 Route<void> settingsRoute() =>
     MaterialPageRoute(builder: (_) => const SettingsPage());
@@ -421,6 +423,12 @@ class _SettingsPageState extends State<SettingsPage> {
             onTap: _clearCache,
           ),
           _section('关于'),
+          _tile(
+            icon: Icons.system_update_alt_rounded,
+            title: '检查更新',
+            subtitle: '自动检查并升级到最新版本',
+            onTap: () => UpdateFlow.checkManually(context, assetKey: UpdateConfig.phoneAssetKey),
+          ),
           _tile(
             icon: Icons.description_outlined,
             title: '许可',
