@@ -59,10 +59,20 @@ class MainActivity : FlutterActivity() {
                             result.error("bad_args", "缺少 APK 路径", null)
                             return@setMethodCallHandler
                         }
+                        // Android 8+ 若还没授予「安装未知应用」，先返回明确信号，
+                        // 让 Dart 层引导用户去开权限——否则 ACTION_VIEW 会直接抛
+                        // FileUriExposedException / ActivityNotFound，表现为「无法拉起安装器」。
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                            !packageManager.canRequestPackageInstalls()
+                        ) {
+                            result.error("no_install_permission", "未授予「安装未知应用」权限", null)
+                            return@setMethodCallHandler
+                        }
                         try {
                             installApk(path)
                             result.success(true)
                         } catch (t: Throwable) {
+                            android.util.Log.e("hgonly-update", "installApk failed path=$path", t)
                             result.error("install_failed", t.message ?: "拉起安装失败", null)
                         }
                     }

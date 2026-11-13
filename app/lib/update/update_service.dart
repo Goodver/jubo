@@ -140,6 +140,12 @@ class UpdateService {
 
   /// 把 APK 流式下载到临时目录，[onProgress] 回调 0.0~1.0。
   /// 返回下载好的本地文件路径；失败抛异常。
+  ///
+  /// 下载加速：优先尝试 `UpdateConfig.assetProxyPrefixes` 里的每个代理，
+  /// 全部失败则回退 GitHub 直连。代理失败的常见原因：
+  /// - private 仓库部分代理丢弃 Authorization 头 → 401
+  /// - 代理限速 / 偶发 5xx
+  /// - 代理域名被 DNS 污染或解析失败
   Future<String> downloadApk(
     String assetApiUrl,
     String fileName, {
@@ -148,17 +154,55 @@ class UpdateService {
   }) async {
     final dir = await Directory.systemTemp.createTemp('hgonly_update');
     final savePath = '${dir.path}${Platform.pathSeparator}$fileName';
-    final file = File(savePath);
 
-    final req = await _http.getUrl(Uri.parse(assetApiUrl));
+    // 构造候选 URL 列表：每个代理前缀 + 原始 URL（回退）
+    final candidates = <String>[
+      for (final prefix in UpdateConfig.assetProxyPrefixes) '$prefix$assetApiUrl',
+      assetApiUrl, // 最终回退：GitHub 直连
+    ];
+
+    Object? lastError;
+    for (final url in candidates) {
+      try {
+        final path = await _downloadTo(
+          url,
+          savePath,
+          dir,
+          onProgress: onProgress,
+          cancel: cancel,
+        );
+        return path;
+      } catch (e) {
+        lastError = e;
+        if (cancel?.isCancelled ?? false) rethrow;
+        // 下载失败（代理挂/超时/HTTP 错误）：清空文件，试下一个候选
+        final f = File(savePath);
+        if (await f.exists()) await f.delete().catchError((_) => f);
+      }
+    }
+
+    // 所有候选都失败：清理临时目录并抛最后一个错误
+    await _deleteQuietly(dir);
+    throw Exception('下载失败（所有加速通道均不可用）：$lastError');
+  }
+
+  /// 实际执行单个 URL 的流式下载，写入 [savePath]。
+  Future<String> _downloadTo(
+    String url,
+    String savePath,
+    Directory dir, {
+    void Function(double progress, int received, int total)? onProgress,
+    CancelToken? cancel,
+  }) async {
+    final file = File(savePath);
+    final req = await _http.getUrl(Uri.parse(url));
     _authHeaders.forEach((k, v) => req.headers.set(k, v));
-    // 私有仓库的 asset 必须接受二进制流。
+    // 私有仓库的 asset 必须接受二进制流；代理一般会透传这个头
     req.headers.set('Accept', 'application/octet-stream');
     final res = await req.close().timeout(_timeout);
 
     if (res.statusCode != 200) {
-      await _deleteQuietly(dir);
-      throw Exception('下载失败（HTTP ${res.statusCode}）');
+      throw Exception('HTTP ${res.statusCode}（$url）');
     }
     final total = res.contentLength;
     var received = 0;
@@ -168,7 +212,6 @@ class UpdateService {
       await for (final chunk in res) {
         if (cancel?.isCancelled ?? false) {
           await sink.close();
-          await _deleteQuietly(dir);
           throw Exception('已取消');
         }
         received += chunk.length;
@@ -181,7 +224,6 @@ class UpdateService {
       return savePath;
     } catch (_) {
       await sink.close().catchError((_) {});
-      await _deleteQuietly(dir);
       rethrow;
     }
   }

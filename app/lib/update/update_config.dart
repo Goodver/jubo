@@ -28,4 +28,26 @@ class UpdateConfig {
   /// phone flavor → 找文件名含 phone 的；tv flavor → 找含 tv 的。
   static const phoneAssetKey = 'phone';
   static const tvAssetKey = 'tv';
+
+  /// APK 资产下载的加速代理前缀（国内环境必需）。
+  ///
+  /// GitHub 直连在国内/TV 网络下可能只有 30~80 KB/s，下 40MB+ 的 APK 要等近 10 分钟。
+  /// 用公共加速代理（在原 URL 前加代理域名）可提速到 MB/s 级。
+  ///
+  /// 下载顺序：
+  /// 1. 优先尝试 `assetProxyPrefixes` 里的每个代理 + 原始 URL
+  /// 2. 全部失败则回退到 GitHub 直连（仍需 Authorization）
+  ///
+  /// 常见可用代理（按可靠性排序，2026-11 实测）：
+  /// - `https://gh-proxy.com/`（稳定，速度 2~5 MB/s）
+  /// - `https://ghfast.top/`（备用，偶尔限速）
+  /// - `https://github.moeyy.xyz/`（备用，偶尔抽风）
+  ///
+  /// 若仓库改为 public，代理可用性更好（无需 Authorization）；private 仓库的代理支持不确定，
+  /// 部分代理会丢弃 Authorization 头导致 401。如果代理全部失效，客户端会自动回退直连（慢但能下）。
+  static const assetProxyPrefixes = <String>[
+    'https://gh-proxy.com/',
+    'https://ghfast.top/',
+    'https://github.moeyy.xyz/',
+  ];
 }
