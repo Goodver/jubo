@@ -2,6 +2,26 @@
 
 时间均为 2026-11-01 夜间至 11-02 凌晨，单机开发、实机迭代（Redmi Note 12 Turbo / Android 15 / arm64）。
 
+## 0.6.18 (1041) — 取流加固 + 换设备诊断可见化
+
+已发 GitHub Release `v1041`（双资产：`hgonly-phone-1041.apk` / `hgonly-tv-1041.apk`）。
+
+- 新增 `key_seed` 密文 URL 解密（`ohg/internal/protocol/spade_url.go`）。信封 `a8 ?? 01 00`，
+  key/iv 由 `sha512(seed)` 与 64 字节常量段二次 sha512 派生，AES-128-CBC 解 `main_url` /
+  `backup_url` / dynamic 音频轨。服务端不下发 seed 时路径完全不变；全部解不开显式报
+  `ErrSpadeURL`，绝不把密文交给播放器。
+- 新增节奏链 + 熔断（`ohg/guard.go`）：相邻取流最小间隔 **500ms**、全局串行；连续 3 次
+  空结果熔断 30s 并逐轮翻倍至 5min；半开只放一个探针，`defer release` 防探测位泄漏。
+  实测定值：1s 间隔会让连切三集停下那集 1649ms，500ms 时降到 484ms。
+- 换设备过程可见化（`ohg/trace.go`）：`traceLog` 实现 `sdk.Logger`（环形留最近 8 行），
+  `countStore` 在 `Reset` 成功时计数（不解析日志文案）。`rotations` 一路透传到
+  `PlaybackPlan.rotations`，成功路径也能看到（0 = 首台设备直接成功）；失败时错误串带
+  「换设备 N 次 + SDK 告警行」。此前这条路完全是黑盒。
+- 手机端补日志：`resolve ok ... rotations=`、`open FAILED:`、`warm FAILED:`（预加载失败
+  不再被 `catch (_)` 静默吞掉）。
+- 修正 `ohg` 包头注释：实测同档案连续取流不会被判空（第 1 集 1270ms、第 2 集 308ms），
+  「一台匿名设备只给一次播放模型」不成立。
+
 ## 0.6.4 (11) — 修复点击全失效 + 换页闪帧
 
 - 修：除了上下滑屏，轻触暂停、双击点赞、顶栏、底部控件全部点不动
