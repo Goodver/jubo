@@ -46,3 +46,6 @@ tv_p0_sc_err.txt
 .DS_Store
 Thumbs.db
 *.swp
+
+# 原生库重编前的本地备份，不入库
+.so-backup-*/

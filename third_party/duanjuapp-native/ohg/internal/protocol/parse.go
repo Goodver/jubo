@@ -773,10 +773,13 @@ func ParsePlayback(raw []byte, episodeID string) (*model.Playback, error) {
 		URLExpire flexInt64       `json:"url_expire"`
 		VideoList json.RawMessage `json:"video_list"`
 		Dynamic   json.RawMessage `json:"dynamic_video"`
+		// KeySeed 存在时表示 video_list 里的媒体地址是密文，需要 AES 解密。
+		KeySeed string `json:"key_seed"`
 	}
 	if err := json.Unmarshal(body, &video); err != nil {
 		return nil, fmt.Errorf("playback model is not JSON: %w", err)
 	}
+	seed := strings.TrimSpace(video.KeySeed)
 	items := []playbackItem{}
 	if list := bytes.TrimSpace(video.VideoList); len(list) > 0 && string(list) != "null" && string(list) != "[]" {
 		items, err = playbackItems(video.VideoList)
@@ -805,6 +808,11 @@ func ParsePlayback(raw []byte, episodeID string) (*model.Playback, error) {
 			var track playbackItem
 			if err := json.Unmarshal(dynamic.AudioList[0], &track); err == nil {
 				audioURL = strings.TrimSpace(track.MainURL)
+				if audioURL != "" && seed != "" {
+					if plain, plainErr := DecryptSpadeURL(audioURL, seed); plainErr == nil {
+						audioURL = plain
+					}
+				}
 			}
 		}
 	}
@@ -817,8 +825,26 @@ func ParsePlayback(raw []byte, episodeID string) (*model.Playback, error) {
 		Streams:         make([]model.Stream, 0, len(items)),
 	}
 	protected := 0
+	urlAttempts, urlFailures := 0, 0
 	for _, item := range items {
 		stream := item.stream()
+		if seed != "" {
+			// 模型带 key_seed 时媒体地址是密文。解不开的保留原值，
+			// 至少让其余清晰度还能用；全解不开会在下面显式报错。
+			if strings.TrimSpace(stream.URL) != "" {
+				urlAttempts++
+				if plain, urlErr := DecryptSpadeURL(stream.URL, seed); urlErr != nil {
+					urlFailures++
+				} else {
+					stream.URL = plain
+				}
+			}
+			if strings.TrimSpace(stream.BackupURL) != "" {
+				if plain, urlErr := DecryptSpadeURL(stream.BackupURL, seed); urlErr == nil {
+					stream.BackupURL = plain
+				}
+			}
+		}
 		if stream.URL == "" {
 			continue
 		}
@@ -832,6 +858,11 @@ func ParsePlayback(raw []byte, episodeID string) (*model.Playback, error) {
 	}
 	if len(out.Streams) == 0 {
 		return nil, fmt.Errorf("playback model unavailable")
+	}
+	if urlAttempts > 0 && urlFailures == urlAttempts {
+		// 模型声明了 key_seed 却一个地址都解不开：宁可明确失败，也不要把密文
+		// 当播放地址交给播放器 —— 那会表现为「URL 打不开」这种难以归因的故障。
+		return nil, fmt.Errorf("%w: the model carries key_seed but no media URL could be decrypted", ErrSpadeURL)
 	}
 	out.AudioURL = audioURL
 	out.Protected = protected == len(out.Streams)

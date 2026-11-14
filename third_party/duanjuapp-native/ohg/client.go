@@ -56,6 +56,7 @@ type Result struct {
 type Engine struct {
 	mu     sync.Mutex
 	client *sdk.Client
+	guard  *playbackGuard
 }
 
 // New 用 profilePath 作为匿名设备档案的持久化位置创建引擎。
@@ -73,7 +74,7 @@ func New(profilePath string) (*Engine, error) {
 	if err != nil {
 		return nil, fmt.Errorf("初始化匿名播放引擎失败: %w", err)
 	}
-	return &Engine{client: client}, nil
+	return &Engine{client: client, guard: newPlaybackGuard()}, nil
 }
 
 // Resolve 取一集的播放模型。加密分集会连同 ErrDRMProtected 返回，
@@ -92,13 +93,25 @@ func (e *Engine) Resolve(ctx context.Context, episodeID string) (*Result, error)
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
+	// 节奏链 + 熔断：连续空结果时先暂停，别把设备额度继续打空。
+	probe, guardErr := e.guard.acquire(ctx)
+	if guardErr != nil {
+		return nil, guardErr
+	}
+	defer e.guard.release(probe)
+
 	pb, err := e.client.ResolvePlayback(ctx, id, sdk.PlaybackOptions{})
 	if err != nil && !errors.Is(err, sdk.ErrDRMProtected) {
+		if errors.Is(err, sdk.ErrAnonymousLimited) {
+			e.guard.reportEmpty()
+		}
 		return nil, fmt.Errorf("匿名设备取流失败: %w", err)
 	}
 	if pb == nil {
+		e.guard.reportEmpty()
 		return nil, errors.New("匿名设备取流返回空播放模型")
 	}
+	e.guard.reportOK()
 	out := &Result{
 		EpisodeID: pb.EpisodeID,
 		VideoID:   pb.VideoID,
