@@ -65,6 +65,9 @@ class _StartupUpdateCheckState extends State<_StartupUpdateCheck> {
     // 延迟到推荐流已推出、首帧稳定后再查，避免跟启动动画抢焦点。
     Future<void>.delayed(const Duration(seconds: 3), () async {
       if (!mounted) return;
+      // 顺手清掉过期安装包（只清 3 天前的，不会误删刚下好待安装的包）。
+      await UpdateFlow.cleanup();
+      if (!mounted) return;
       await UpdateFlow.checkOnStartup(context, assetKey: UpdateConfig.phoneAssetKey);
     });
   }

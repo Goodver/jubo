@@ -1,8 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- FileProvider 路径映射：自动升级把 APK 下到应用私有目录后交给系统安装器。 -->
+<!-- FileProvider 路径映射：自动升级把 APK 下载到应用私有目录后交给系统安装器。
+
+     这里的声明**必须覆盖 APK 的实际落点**，否则 FileProvider.getUriForFile()
+     会抛 IllegalArgumentException("Failed to find configured root that contains ...")，
+     症状是「怎么也拉不起安装器」——而且极易被误判成「没给安装权限」。
+
+     实际落点：path_provider 的 getApplicationSupportDirectory() = getFilesDir()，
+     APK 存在 <files>/updates/ 下 → 由下面的 files-path 覆盖。 -->
 <paths>
-    <!-- 覆盖 getExternalFilesDir 下所有子目录（下载的 APK 放这里）。 -->
-    <external-files-path name="update_apk" path="." />
-    <!-- 兜底覆盖内部 files 目录。 -->
+    <!-- 主路径：getFilesDir() 全量（含 updates/ 子目录）。 -->
     <files-path name="update_apk_internal" path="." />
+    <!-- 覆盖 getExternalFilesDir 下所有子目录（备用下载位置）。 -->
+    <external-files-path name="update_apk" path="." />
+    <!-- 防御：万一某些机型 TMPDIR 落在 cacheDir，也能分享出去。 -->
+    <cache-path name="update_apk_cache" path="." />
 </paths>

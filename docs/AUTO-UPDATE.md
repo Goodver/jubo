@@ -24,9 +24,40 @@ GitHub 私有仓库 `Goodver/jubo` 的 **Releases**。客户端拉 `releases/lat
 ## 关键约定
 
 - **升级判据是 versionCode（`+N`）**，不是语义版本字符串。忘改 `+N` 客户端不会提示升级。
-- token 在 `lib/update/update_config.dart`（fine-grained，只有 jubo 的 Contents 读权限）。
-  泄露的最坏后果是别人能下安装包，动不了源码；担心时回 GitHub revoke 换新，改那一个常量即可。
+- `lib/update/update_config.dart` 的 `token` **必须留空**：仓库已是 public，匿名即可拉清单和下载。
+  只有在仓库改回 private 时才需要填一个只读 Contents 的 PAT。烤进已 revoke 的 token 会导致
+  清单请求 401 → 检查更新静默失败不弹窗（v1037 踩过）。
 - Android 8+ 首次安装会引导用户开「安装未知应用」授权，已通过 `REQUEST_INSTALL_PACKAGES` + FileProvider 处理。
+
+## 升级流程的顺序（build 1042 起重排）
+
+```
+确认升级 → ① 查 canRequestPackageInstalls() →（无权限）引导授权 + 轮询等待
+        → ② 下载（固定目录，按资产 size 复用已下好的包）
+        → ③ ACTION_VIEW 拉起安装器
+```
+
+三条铁律，破坏任何一条都会退化成「反复把人送去授权页、永远装不上」：
+
+1. **权限必须在下载之前查**。原来是先下 40MB+ 再发现装不了，白费流量。
+2. **下载目录必须被 FileProvider 声明覆盖**。见下节。
+3. **安装失败要按 code 分流**：只有 `no_install_permission` 才引导授权；
+   `install_failed`（FileProvider 路径、APK 损坏、ActivityNotFound）要如实报错。
+   以前是 `catch (_)` 一把抓，把所有失败都当权限问题 → 无脑跳设置页，
+   真 bug 被永久掩盖。判断入口是 `InstallException.needsPermission`。
+
+## ⚠️ FileProvider 覆盖不到下载目录 = 装不上（而且像「没权限」）
+
+`FileProvider.getUriForFile()` 只认 `res/xml/file_paths.xml` 里声明过的根，**不匹配就抛
+`IllegalArgumentException("Failed to find configured root that contains ...")`**。
+表现是「点升级→跳权限页→授权→回来→再跳权限页」，装多少个来回都装不上。
+
+历史坑：APK 曾下在 `Directory.systemTemp`（Android 上是 cacheDir），而 `file_paths.xml`
+只声明了 `files-path` / `external-files-path`，**唯独漏了 `cache-path`** → 必然抛异常。
+
+现在：下载目录改为 `getApplicationSupportDirectory()`（= `getFilesDir()`）下的 `updates/`，
+被 `<files-path path=".">` 覆盖；`file_paths.xml` 同时保留 `cache-path` 兜底。
+**改下载目录时，务必同步改 `file_paths.xml`。**
 
 ## ⚠️ TV 打包必带 `-t`（血泪坑）
 

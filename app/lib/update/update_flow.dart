@@ -1,5 +1,3 @@
-import 'dart:io';
-
 import 'package:flutter/material.dart';
 
 import '../appmeta.dart';
@@ -97,13 +95,94 @@ class UpdateFlow {
     );
 
     if (confirmed != true || !context.mounted) return;
-    await _downloadAndInstall(context, url, name);
+    await _downloadAndInstall(context, url, name, res.apkSize);
   }
 
+  /// 升级主流程，顺序是刻意安排的：
+  ///   1. **先查安装权限**（几乎零开销）——没权限就别下几十 MB；
+  ///   2. 再下载（目录固定，可按大小复用已下好的包）；
+  ///   3. 最后拉起安装器，失败按原因分流，不再把所有错误都当成「要授权」。
   static Future<void> _downloadAndInstall(
     BuildContext context,
     String url,
     String name,
+    int? expectedSize,
+  ) async {
+    // —— 1. 权限预检 ——
+    if (!await ApkInstaller.hasInstallPermission()) {
+      if (!context.mounted) return;
+      final granted = await _askAndWaitPermission(context);
+      if (!granted || !context.mounted) return;
+    }
+    if (!context.mounted) return;
+
+    // —— 2. 下载 ——
+    final apkPath = await _download(context, url, name, expectedSize);
+    if (apkPath == null || !context.mounted) return;
+
+    // —— 3. 安装 ——
+    await _installWithFallback(context, apkPath);
+  }
+
+  /// 引导用户去开「安装未知应用」，并等他从设置页回来。
+  ///
+  /// 用轮询而不是生命周期监听：部分电视切换到系统设置页不会触发
+  /// paused → resumed，靠 `AppLifecycleState` 会一直等不到。
+  static Future<bool> _askAndWaitPermission(BuildContext context) async {
+    final go = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: Hg.bg2,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(Hg.radius)),
+        title: const Text('需要安装权限'),
+        content: const Text(
+          '系统要求先允许本应用「安装未知应用」，否则无法自动安装新版本。\n\n'
+          '点「去授权」打开开关后直接返回即可，应用会自动继续，不用重新下载。',
+          style: TextStyle(color: Hg.text2, fontSize: 13),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('暂不升级'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Hg.brand),
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('去授权'),
+          ),
+        ],
+      ),
+    );
+    if (go != true || !context.mounted) return false;
+
+    try {
+      await ApkInstaller.openPermissionSettings();
+    } catch (e) {
+      if (context.mounted) {
+        await _info(context, '无法打开设置',
+            '请手动到「系统设置 → 应用 → 特殊权限 → 安装未知应用」里允许本应用，然后重试。');
+      }
+      return false;
+    }
+
+    // 最多等 5 分钟。用户在设置页授权后返回，这里就能感知到。
+    final deadline = DateTime.now().add(const Duration(minutes: 5));
+    while (DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(const Duration(milliseconds: 600));
+      if (await ApkInstaller.hasInstallPermission()) return true;
+    }
+    if (context.mounted) {
+      await _info(context, '尚未授权', '没有检测到「安装未知应用」权限，本次升级已取消。授权后可以再点一次「检查更新」。');
+    }
+    return false;
+  }
+
+  /// 带进度框下载 APK。返回本地路径；失败或取消返回 null。
+  static Future<String?> _download(
+    BuildContext context,
+    String url,
+    String name,
+    int? expectedSize,
   ) async {
     final cancel = CancelToken();
 
@@ -122,7 +201,7 @@ class UpdateFlow {
           title: const Text('正在下载更新'),
           content: ValueListenableBuilder<double>(
             valueListenable: notifier,
-            builder: (_, value, __) => Column(
+            builder: (_, value, _) => Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -134,7 +213,7 @@ class UpdateFlow {
                 const SizedBox(height: 12),
                 ValueListenableBuilder<String>(
                   valueListenable: statusText,
-                  builder: (_, text, __) => Text(
+                  builder: (_, text, _) => Text(
                     text,
                     style: const TextStyle(color: Hg.text3, fontSize: 12),
                   ),
@@ -160,6 +239,7 @@ class UpdateFlow {
       apkPath = await UpdateService.instance.downloadApk(
         url,
         name,
+        expectedSize: expectedSize,
         cancel: cancel,
         onProgress: (p, received, total) {
           notifier.value = p;
@@ -170,9 +250,9 @@ class UpdateFlow {
       );
     } catch (e) {
       if (context.mounted) Navigator.of(context, rootNavigator: true).pop();
-      if (cancel.isCancelled) return;
+      if (cancel.isCancelled) return null;
       if (context.mounted) await _info(context, '下载失败', e.toString());
-      return;
+      return null;
     } finally {
       notifier.dispose();
       statusText.dispose();
@@ -182,20 +262,36 @@ class UpdateFlow {
     if (context.mounted) Navigator.of(context, rootNavigator: true).pop();
     await downloading;
 
-    if (apkPath.isEmpty || !context.mounted) return;
+    if (apkPath.isEmpty) return null;
+    return apkPath;
+  }
 
-    // 拉起系统安装器。失败多半是没给「安装未知应用」权限，引导去开。
+  /// 拉起安装器；失败时按原因分流。
+  ///
+  /// 关键点：**只有 `needsPermission` 才去引导授权**。之前是 `catch (_)` 一把抓，
+  /// 把 FileProvider 路径不匹配之类的真 bug 也当成「没授权」，于是反复把用户
+  /// 送到设置页，授权回来重下重试，永远装不上。
+  static Future<void> _installWithFallback(BuildContext context, String apkPath) async {
     try {
       await ApkInstaller.install(apkPath);
-    } catch (_) {
-      try {
-        await ApkInstaller.openPermissionSettings();
-        if (context.mounted) {
-          await _info(context, '需要安装权限',
-              '请在「安装未知应用」里允许本应用安装，然后回到这里重新点「立即升级」。');
+      return; // 系统安装器已接管，后续 UI 不必再做
+    } on InstallException catch (e) {
+      if (e.needsPermission) {
+        // 少见：下载期间权限被撤销/被系统回收。再引导一次，回来直接用现成文件重试。
+        if (!context.mounted) return;
+        final granted = await _askAndWaitPermission(context);
+        if (!granted || !context.mounted) return;
+        try {
+          await ApkInstaller.install(apkPath);
+        } on InstallException catch (retryError) {
+          if (context.mounted) {
+            await _info(context, '安装失败', '${retryError.message}\n\n安装包已下载：$apkPath');
+          }
         }
-      } catch (_) {
-        if (context.mounted) await _info(context, '安装失败', '无法拉起安装器，请手动安装已下载的 APK。');
+        return;
+      }
+      if (context.mounted) {
+        await _info(context, '安装失败', '${e.message}\n\n安装包已下载：$apkPath');
       }
     }
   }
@@ -218,15 +314,8 @@ class UpdateFlow {
     );
   }
 
-  /// 清理历史下载残留（临时目录，可安全删）。
+  /// 清理下载目录里的旧安装包（只删过期文件，不会误删待安装的包）。
   static Future<void> cleanup() async {
-    try {
-      final base = Directory.systemTemp;
-      await for (final d in base.list()) {
-        if (d is Directory && d.path.contains('hgonly_update')) {
-          await d.delete(recursive: true).catchError((_) => d);
-        }
-      }
-    } catch (_) {}
+    await UpdateService.instance.cleanupStale();
   }
 }

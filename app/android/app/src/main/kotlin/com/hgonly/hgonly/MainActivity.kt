@@ -53,6 +53,18 @@ class MainActivity : FlutterActivity() {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, updateChannelName)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
+                    // 下载前先查权限：没授权就先引导，别白下 40MB+ 的包再失败。
+                    "hasInstallPermission" -> {
+                        try {
+                            val granted = Build.VERSION.SDK_INT < Build.VERSION_CODES.O ||
+                                packageManager.canRequestPackageInstalls()
+                            result.success(granted)
+                        } catch (t: Throwable) {
+                            // 查不出来不要拦着下载，交给 installApk 报真实错误。
+                            android.util.Log.w("hgonly-update", "hasInstallPermission failed", t)
+                            result.success(true)
+                        }
+                    }
                     "installApk" -> {
                         val path = call.argument<String>("path")
                         if (path.isNullOrBlank()) {
@@ -73,7 +85,14 @@ class MainActivity : FlutterActivity() {
                             result.success(true)
                         } catch (t: Throwable) {
                             android.util.Log.e("hgonly-update", "installApk failed path=$path", t)
-                            result.error("install_failed", t.message ?: "拉起安装失败", null)
+                            // 把 FileProvider 路径失配单列出来：它的症状和「没授权」几乎一样
+                            // （都是拉不起安装器），但修法完全不同，不能混在一起。
+                            val msg = if (t is IllegalArgumentException) {
+                                "APK 路径不在 FileProvider 声明范围内，请检查 file_paths.xml：${t.message}"
+                            } else {
+                                t.message ?: "拉起安装失败"
+                            }
+                            result.error("install_failed", msg, null)
                         }
                     }
                     // 跳系统「安装未知应用」授权页（Android 8+ 装包前可能需要）。

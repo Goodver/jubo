@@ -2,6 +2,27 @@
 
 时间均为 2026-11-01 夜间至 11-02 凌晨，单机开发、实机迭代（Redmi Note 12 Turbo / Android 15 / arm64）。
 
+## 0.6.19 (1042) — 修复升级「只会跳授权页、授权完又重下」
+
+- **修：FileProvider 覆盖不到下载目录，安装器永远拉不起来**（真 bug，根因）
+  - APK 下在 `Directory.systemTemp`（Android 上是 cacheDir），而 `file_paths.xml` 只声明了
+    `files-path` / `external-files-path`，**漏了 `cache-path`** → `getUriForFile()` 抛
+    IllegalArgumentException → 装不上。
+  - 下载目录改到 `getApplicationSupportDirectory()/updates/`（= `getFilesDir()`，已被
+    `<files-path>` 覆盖）；`file_paths.xml` 同时补 `cache-path` 兜底。
+- **修：安装失败一律被当成「没权限」**，于是反复跳设置页、真错误被永久掩盖
+  - 原来 `catch (_)` → 直接 `openPermissionSettings()`。现在按原生 error code 分流：
+    `no_install_permission` 才引导授权，`install_failed` 如实报错（`InstallException.needsPermission`）。
+  - 原生侧把 FileProvider 路径失配单列成明确文案，不再和权限混为一谈。
+- **改：先查权限再下载**。原来先下 40MB+ 才检查，没授权等于白下。现在确认升级后
+  先 `canRequestPackageInstalls()`，没权限先引导，拒绝授权就直接不下载。
+- **改：授权返回后自动继续，不重新下载**
+  - 下载目录由 `createTemp` 随机名改为固定目录，按远端资产 `size` 判定是否可复用；
+  - 授权后轮询感知（600ms 一次，最多 5 分钟；不用生命周期监听，部分电视切设置页不触发
+    paused/resumed），检测到已授权就直接用现成文件拉安装器。
+- **改：清理策略**。原来 `cleanup()` 会删掉所有含 `hgonly_update` 的目录（含刚下好待装的包），
+  且实际没被调用过。现在只在启动时删超过 3 天的旧包，手机/TV 启动各调一次。
+
 ## 0.6.18 (1041) — 取流加固 + 换设备诊断可见化
 
 已发 GitHub Release `v1041`（双资产：`hgonly-phone-1041.apk` / `hgonly-tv-1041.apk`）。

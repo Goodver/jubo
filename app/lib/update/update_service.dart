@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'dart:io';
 
 import '../appmeta.dart';
+import 'package:path_provider/path_provider.dart';
+
 import 'update_config.dart';
 
 /// 一次「检查更新」的结果。
@@ -14,6 +16,7 @@ class UpdateCheckResult {
     this.notes,
     this.apkUrl,
     this.apkName,
+    this.apkSize,
     this.tagName,
     this.error,
   });
@@ -29,6 +32,11 @@ class UpdateCheckResult {
   final String? notes;
   final String? apkUrl;
   final String? apkName;
+
+  /// 资产字节数（GitHub 清单里的 `size`）。用于判断已下载的包能否直接复用，
+  /// 免掉「授权回来又重下一遍」。
+  final int? apkSize;
+
   final String? tagName;
   final String? error;
 
@@ -134,6 +142,7 @@ class UpdateService {
         notes: notes.isEmpty ? null : notes,
         apkUrl: (apk['url'] as String?), // asset 的 url 走 API，需带 token 下载
         apkName: apk['name'] as String?,
+        apkSize: (apk['size'] as num?)?.toInt(),
         tagName: tag,
       );
     } on TimeoutException {
@@ -143,8 +152,28 @@ class UpdateService {
     }
   }
 
-  /// 把 APK 流式下载到临时目录，[onProgress] 回调 0.0~1.0。
+  /// APK 下载目录名（位于应用私有 files 目录下）。
+  ///
+  /// 落点必须落在 Android 侧 `res/xml/file_paths.xml` 声明过的根里，否则
+  /// `FileProvider.getUriForFile()` 会抛 IllegalArgumentException，症状是
+  /// 「怎么也拉不起安装器」。这里用 `getApplicationSupportDirectory()`
+  /// （= `getFilesDir()`，已被 `<files-path path=".">` 覆盖）而不是
+  /// `Directory.systemTemp`，是因为后者依赖引擎设置的 TMPDIR，位置不保证。
+  static const updateDirName = 'updates';
+
+  /// 下载目录（必要时创建）。
+  static Future<Directory> _updateDir() async {
+    final base = await getApplicationSupportDirectory();
+    final dir = Directory('${base.path}${Platform.pathSeparator}$updateDirName');
+    if (!await dir.exists()) await dir.create(recursive: true);
+    return dir;
+  }
+
+  /// 把 APK 流式下载到固定的私有目录，[onProgress] 回调 0.0~1.0。
   /// 返回下载好的本地文件路径；失败抛异常。
+  ///
+  /// 目录固定（不再用 `createTemp` 生成随机名）是为了让 [expectedSize] 能命中复用：
+  /// 用户「下载完 → 发现没授权 → 去设置页 → 回来」时直接拿现成文件，不重下几十 MB。
   ///
   /// 下载加速：优先尝试 `UpdateConfig.assetProxyPrefixes` 里的每个代理，
   /// 全部失败则回退 GitHub 直连。代理失败的常见原因：
@@ -154,11 +183,25 @@ class UpdateService {
   Future<String> downloadApk(
     String assetApiUrl,
     String fileName, {
+    int? expectedSize,
     void Function(double progress, int received, int total)? onProgress,
     CancelToken? cancel,
   }) async {
-    final dir = await Directory.systemTemp.createTemp('hgonly_update');
+    final dir = await _updateDir();
     final savePath = '${dir.path}${Platform.pathSeparator}$fileName';
+
+    // 复用已完整下载的包（大小与远端资产一致才算数，避免拿到截断文件）。
+    final existing = File(savePath);
+    if (expectedSize != null &&
+        expectedSize > 0 &&
+        await existing.exists() &&
+        await existing.length() == expectedSize) {
+      if (cancel?.isCancelled ?? false) throw Exception('已取消');
+      onProgress?.call(1.0, expectedSize, expectedSize);
+      return savePath;
+    }
+    // 大小不符（截断/旧版本残留）：先删掉再下。
+    if (await existing.exists()) await existing.delete().catchError((_) => existing);
 
     // 构造候选 URL 列表：每个代理前缀 + 原始 URL（回退）
     final candidates = <String>[
@@ -186,8 +229,6 @@ class UpdateService {
       }
     }
 
-    // 所有候选都失败：清理临时目录并抛最后一个错误
-    await _deleteQuietly(dir);
     throw Exception('下载失败（所有加速通道均不可用）：$lastError');
   }
 
@@ -239,10 +280,24 @@ class UpdateService {
     _client = null;
   }
 
-  /// 静默删除临时目录（清理失败忽略）。
-  static Future<void> _deleteQuietly(Directory dir) async {
+  /// 清理下载目录里的旧安装包。
+  ///
+  /// 只删「超过 [maxAge] 没动过」的文件，**绝不整目录清空**：否则用户刚下好、
+  /// 正等授权后安装的包会被下一次启动顺手删掉，又变成重新下载。
+  /// 默认留 3 天，足够覆盖跨天的升级流程，也不至于让 40MB+ 的包长期占缓存。
+  Future<void> cleanupStale({Duration maxAge = const Duration(days: 3)}) async {
     try {
-      if (await dir.exists()) await dir.delete(recursive: true);
+      final dir = await _updateDir();
+      final now = DateTime.now();
+      await for (final entity in dir.list()) {
+        if (entity is! File) continue;
+        try {
+          final stat = await entity.stat();
+          if (now.difference(stat.modified) > maxAge) await entity.delete();
+        } catch (_) {
+          // 单个文件删不掉不影响其它，忽略
+        }
+      }
     } catch (_) {}
   }
 

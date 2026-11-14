@@ -150,6 +150,9 @@ class _TvHomePageState extends State<TvHomePage> {
     // 启动进首页、首帧稳定后静默检查一次更新，有新版才弹窗（不抢启动焦点）。
     Future<void>.delayed(const Duration(seconds: 3), () async {
       if (!mounted) return;
+      // 顺手清掉过期安装包（只清 3 天前的，不会误删刚下好待安装的包）。
+      await UpdateFlow.cleanup();
+      if (!mounted) return;
       await UpdateFlow.checkOnStartup(context, assetKey: UpdateConfig.tvAssetKey);
     });
   }
