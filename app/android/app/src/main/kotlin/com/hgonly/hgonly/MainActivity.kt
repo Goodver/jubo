@@ -98,8 +98,17 @@ class MainActivity : FlutterActivity() {
                     // 跳系统「安装未知应用」授权页（Android 8+ 装包前可能需要）。
                     "openInstallPermissionSettings" -> {
                         try {
-                            openInstallPermissionSettings()
-                            result.success(true)
+                            if (openInstallPermissionSettings()) {
+                                result.success(true)
+                            } else {
+                                // 系统压根没有这个设置页：这是硬件/ROM 限制，不是 App 的错，
+                                // 必须让 Dart 层能区分出来，否则只能弹「无法打开设置」误导用户。
+                                result.error(
+                                    "no_settings_ui",
+                                    "该设备的系统没有提供「安装未知应用」设置入口",
+                                    null,
+                                )
+                            }
                         } catch (t: Throwable) {
                             result.error("settings_failed", t.message ?: "无法打开设置", null)
                         }
@@ -128,19 +137,43 @@ class MainActivity : FlutterActivity() {
         startActivity(intent)
     }
 
-    private fun openInstallPermissionSettings() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
-                data = Uri.parse("package:$packageName")
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    /**
+     * 打开「安装未知应用」授权页，返回是否真的打开了。
+     *
+     * 很多国内电视/定制 ROM 把这个设置页整个删掉了（实测创维 Android 12、海尔
+     * 都 resolve 不到，应用详情页里也没有特殊权限入口）。直接 startActivity 会抛
+     * ActivityNotFoundException，用户只看到「无法打开设置」，根本不知道这是系统限制。
+     * 所以先探测有没有处理者，没有就返回 false，让 Dart 层给出准确说明。
+     */
+    private fun openInstallPermissionSettings(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            // 旧系统用全局「未知来源」开关。
+            val legacy = Intent(Settings.ACTION_SECURITY_SETTINGS)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            return try {
+                startActivity(legacy); true
+            } catch (t: Throwable) {
+                android.util.Log.w("hgonly-update", "open security settings failed", t)
+                false
             }
-            startActivity(intent)
-        } else {
-            // 旧系统没有未知来源按应用授权，退回通用安全设置。
-            startActivity(Intent(Settings.ACTION_SECURITY_SETTINGS).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            })
         }
+        // 只认 MANAGE_UNKNOWN_APP_SOURCES：应用详情页虽然能打开，但阉割过的 ROM
+        // 里面并没有这个开关，把用户引过去等于白跑一趟。
+        val candidates = listOf(
+            Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")),
+            Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES),
+        )
+        for (intent in candidates) {
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            if (packageManager.resolveActivity(intent, 0) == null) continue
+            try {
+                startActivity(intent)
+                return true
+            } catch (t: Throwable) {
+                android.util.Log.w("hgonly-update", "open install settings failed", t)
+            }
+        }
+        return false
     }
 
     private fun readIdentity(): Map<String, Any> {

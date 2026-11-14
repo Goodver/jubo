@@ -51,9 +51,22 @@ class ApkInstaller {
     }
   }
 
-  /// 打开系统「安装未知应用」授权页（Android 8+）。
-  static Future<void> openPermissionSettings() async {
-    if (!Platform.isAndroid) return;
-    await _channel.invokeMethod<void>('openInstallPermissionSettings');
+  /// 打开系统「安装未知应用」授权页。
+  ///
+  /// 返回 **false** 表示这台设备的系统压根没有这个设置入口——国内电视/定制 ROM
+  /// 常见（实测创维 Android 12、海尔都没有，连应用详情页里也没特殊权限）。
+  /// 这不是权限没给，也不是代码问题，而是 ROM 限制，必须如实告诉用户，
+  /// 否则只会反复弹「无法打开设置」让人以为是 bug。
+  static Future<bool> openPermissionSettings() async {
+    if (!Platform.isAndroid) return false;
+    try {
+      await _channel.invokeMethod<void>('openInstallPermissionSettings');
+      return true;
+    } on PlatformException catch (e) {
+      if (e.code == 'no_settings_ui') return false;
+      rethrow;
+    } on MissingPluginException {
+      return false;
+    }
   }
 }

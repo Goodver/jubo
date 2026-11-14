@@ -2,6 +2,21 @@
 
 时间均为 2026-11-01 夜间至 11-02 凌晨，单机开发、实机迭代（Redmi Note 12 Turbo / Android 15 / arm64）。
 
+## 0.6.20 (1044) — 电视端诚实告知「本机不支持应用内安装」
+
+实机验证 1042 时发现：创维 Hi3751V660 / Android 12 与海尔都**没有**
+`Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES` 的处理者（`resolve-activity` 返回
+`No activity found`），应用详情页里也没有特殊权限入口。点「去授权」只能落到一句
+「无法打开设置」，用户会以为是 bug。
+
+- 原生 `openInstallPermissionSettings()` 改为**先探测再启动**：只认
+  `MANAGE_UNKNOWN_APP_SOURCES`（带/不带 package 两种），`resolveActivity` 为空就返回
+  `no_settings_ui`。**不再退回应用详情页**——阉割 ROM 里那页没有开关，把用户引过去等于白跑。
+- Dart 侧 `openPermissionSettings()` 返回 bool；`no_settings_ui` 时提示
+  「本机不支持应用内安装」，并给出 adb / U 盘两条手动路径。
+- 记住该状态（`update.no_install_ui`）：启动自动检查遇到「无权限 + 已知无入口」直接跳过，
+  不再每次开机弹一个点了也装不成的框；手动「检查更新」仍然照常工作。
+
 ## 0.6.19 (1042) — 修复升级「只会跳授权页、授权完又重下」
 
 - **修：FileProvider 覆盖不到下载目录，安装器永远拉不起来**（真 bug，根因）

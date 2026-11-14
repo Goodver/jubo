@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../appmeta.dart';
 import '../theme.dart';
@@ -12,9 +13,32 @@ import 'update_service.dart';
 class UpdateFlow {
   UpdateFlow._();
 
+  /// 记录「这台设备的系统没有安装权限入口」，避免每次开机都弹一个装不成的升级框。
+  static const _kNoInstallUi = 'update.no_install_ui';
+
+  static Future<bool> _knownNoInstallUi() async {
+    try {
+      final sp = await SharedPreferences.getInstance();
+      return sp.getBool(_kNoInstallUi) ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static Future<void> _markNoInstallUi() async {
+    try {
+      final sp = await SharedPreferences.getInstance();
+      await sp.setBool(_kNoInstallUi, true);
+    } catch (_) {}
+  }
+
   /// 启动时静默检查。发现新版本且还没问过这次会话，才弹一次。
   /// 不阻塞主流程：检查在后台跑，有结果再在 [context] 上弹窗。
   static Future<void> checkOnStartup(BuildContext context, {String? assetKey}) async {
+    // 已知本机装不了（电视 ROM 阉割了安装权限入口）且当前确实没有权限时，
+    // 不再自动打扰——弹了也只能点「稍后」。手动「检查更新」不受影响。
+    if (!await ApkInstaller.hasInstallPermission() && await _knownNoInstallUi()) return;
+
     final res = await UpdateService.instance.checkForUpdate(assetKey: assetKey);
     if (!res.hasUpdate) return;
     if (!context.mounted) return;
@@ -155,12 +179,27 @@ class UpdateFlow {
     );
     if (go != true || !context.mounted) return false;
 
+    bool opened;
     try {
-      await ApkInstaller.openPermissionSettings();
+      opened = await ApkInstaller.openPermissionSettings();
     } catch (e) {
       if (context.mounted) {
         await _info(context, '无法打开设置',
             '请手动到「系统设置 → 应用 → 特殊权限 → 安装未知应用」里允许本应用，然后重试。');
+      }
+      return false;
+    }
+
+    // 系统没有这个设置入口：ROM 限制，装不了就说清楚，别让用户反复点。
+    if (!opened) {
+      await _markNoInstallUi();
+      if (context.mounted) {
+        await _info(
+          context,
+          '本机不支持应用内安装',
+          '这台设备的系统没有开放「安装未知应用」的设置入口，无法在应用内自动安装新版本。\n\n'
+          '可以改用电脑执行 adb 安装，或把安装包复制到 U 盘、用电视自带的文件管理器安装。',
+        );
       }
       return false;
     }
