@@ -20,6 +20,9 @@ type providerMedia struct {
 	Quality     int
 	Codec       string
 	Variants    []providerMedia
+	// Rotations 是取这份地址时为拿到播放模型换掉了几台匿名设备（仅红果链路，
+	// 其它站源恒为 0）。只用于诊断日志，不参与任何播放决策。
+	Rotations int
 }
 
 func providerCodecRank(codec string) int {

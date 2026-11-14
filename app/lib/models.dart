@@ -119,6 +119,7 @@ class PlaybackPlan {
     required this.routeIndex,
     required this.routeCount,
     required this.qualities,
+    this.rotations = 0,
   });
 
   factory PlaybackPlan.fromJson(Map<String, dynamic> json) => PlaybackPlan(
@@ -135,6 +136,7 @@ class PlaybackPlan {
     expiresAt: _int(json['expiresAt']),
     routeIndex: _int(json['routeIndex']),
     routeCount: _int(json['routeCount']) > 0 ? _int(json['routeCount']) : 1,
+    rotations: _int(json['rotations']),
     qualities: [
       for (final q in (json['qualities'] as List? ?? const []))
         if (_int(q) > 0) _int(q),
@@ -152,6 +154,10 @@ class PlaybackPlan {
   final int routeIndex;
   final int routeCount;
   final List<int> qualities;
+
+  /// 这次取流为拿到播放模型换掉了几台匿名设备，0 表示首台设备直接成功。
+  /// 只用于诊断日志：长期非 0 说明设备档案频繁被判失效。
+  final int rotations;
 
   bool get hasAlternative => session.isNotEmpty && routeIndex + 1 < routeCount;
 }

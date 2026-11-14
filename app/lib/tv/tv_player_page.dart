@@ -329,7 +329,8 @@ class _TvPlayerPageState extends State<TvPlayerPage> {
       });
       _log(
         'resolve ok ${sw.elapsedMilliseconds}ms quality=${plan.quality} '
-        'keyLen=${plan.decryptionKey.length} start=${start.inSeconds}s',
+        'keyLen=${plan.decryptionKey.length} start=${start.inSeconds}s '
+        'rotations=${plan.rotations}',
       );
       unawaited(Store.instance.markWatched(widget.drama.id, episode.number));
       unawaited(_probe());

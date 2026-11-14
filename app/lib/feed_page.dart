@@ -715,6 +715,10 @@ class _FeedPageState extends State<FeedPage>
         await Engine.instance.release(plan.session);
         throw const AppFailure('这一集暂时没有播放地址');
       }
+      debugPrint(
+        '[feed] resolve ok ep=${entry.episode.number} quality=${plan.quality} '
+        'keyLen=${plan.decryptionKey.length} rotations=${plan.rotations}',
+      );
 
       setState(() => _status = '正在起播…');
       await _mount(
@@ -738,6 +742,8 @@ class _FeedPageState extends State<FeedPage>
       unawaited(_preloadAhead());
     } catch (error) {
       if (!mounted || ticket != _generation) return;
+      // 取流失败的诊断（含换设备次数）由 Go 侧附在错误里，必须落进 logcat
+      debugPrint('[feed] open FAILED: $error');
       setState(() {
         _status = '';
         _error = _humanError(error.toString());
@@ -909,9 +915,14 @@ class _FeedPageState extends State<FeedPage>
         return;
       }
       await _mount(stage, plan, key: target.key, start: target.start, play: false);
-      debugPrint('[feed] warm ${target.key} -> stage${_stages.indexOf(stage)}');
-    } catch (_) {
-      // 预加载失败不要紧，真正要播的时候还会再解析一次
+      debugPrint(
+        '[feed] warm ${target.key} -> stage${_stages.indexOf(stage)} '
+        'rotations=${plan.rotations}',
+      );
+    } catch (error) {
+      // 预加载失败不要紧，真正要播的时候还会再解析一次。
+      // 但错误必须留下：设备档案失效通常先在预加载里暴露。
+      debugPrint('[feed] warm FAILED ${target.key}: $error');
     } finally {
       _preloadingKeys.remove(target.key);
     }

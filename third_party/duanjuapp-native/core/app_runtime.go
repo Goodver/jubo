@@ -149,6 +149,8 @@ type nativePlan struct {
 	Session         string            `json:"session,omitempty"`
 	RouteIndex      int               `json:"routeIndex"`
 	RouteCount      int               `json:"routeCount"`
+	// Rotations 是这次取流换掉了几台匿名设备，供 Dart 侧日志判断档案健康度。
+	Rotations int `json:"rotations,omitempty"`
 }
 
 type nativeEngine struct {
@@ -822,5 +824,10 @@ func (engine *nativeEngine) nativeResolve(ctx context.Context, input nativeInput
 	if series, video, valid := hongguoPlaybackIDs(task); valid {
 		choice.danmakuSeries, choice.danmakuVideo = series, video
 	}
-	return engine.nativeOpenPlayback(ctx, choice)
+	plan, err := engine.nativeOpenPlayback(ctx, choice)
+	if err == nil {
+		// 换设备次数只有诊断价值，取流成功后一并交给 Dart 打日志。
+		plan.Rotations = media.Rotations
+	}
+	return plan, err
 }

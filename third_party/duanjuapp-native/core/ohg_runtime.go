@@ -106,10 +106,11 @@ func ohgResultToMedia(result *ohg.Result) (providerMedia, error) {
 			height = stream.Width
 		}
 		base := providerMedia{
-			Referer:  "https://novel.snssdk.com/",
-			Duration: result.Duration,
-			Quality:  height,
-			Codec:    codec,
+			Referer:   "https://novel.snssdk.com/",
+			Duration:  result.Duration,
+			Quality:   height,
+			Codec:     codec,
+			Rotations: result.Rotations,
 		}
 		if stream.Protected {
 			base.CENCKey = key
